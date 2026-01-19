@@ -28,12 +28,13 @@ VanetLinkEnv::VanetLinkEnv(NodeContainer nodes)
 {
     NS_LOG_FUNCTION(this);
     uint32_t numNodes = nodes.GetN();
-    // 5 metrics per link pair (but not self-links)
-    m_observationSize = numNodes * (numNodes - 1) * 5;
+    // 7 metrics per link pair: RSSI, SNR, PacketLoss, Distance, RelSpeed, PreambleErr, PayloadErr
+    // (excluding self-links: numNodes * (numNodes - 1) directed links)
+    m_observationSize = numNodes * (numNodes - 1) * 7;  // UPDATED from 5 to 7
     m_currentObservation.resize(m_observationSize, 0.0);
     m_reward = 0.0;
     m_gameOver = false;
-    
+
     NS_LOG_INFO("VanetLinkEnv created with " << numNodes << " nodes, observation size: " << m_observationSize);
 }
 
@@ -80,13 +81,14 @@ Ptr<OpenGymSpace>
 VanetLinkEnv::GetObservationSpace()
 {
     NS_LOG_FUNCTION(this);
-    // Observation: [RSSI, SNR, PacketLoss, Distance, RelativeSpeed] for each link
+    // Observation: [RSSI, SNR, PacketLoss, Distance, RelativeSpeed, PreambleErr, PayloadErr] for each link
+    // All values normalized to [0, 1] for neural network input
     float low = 0.0;
-    float high = 1.0;  // All values normalized to [0, 1]
+    float high = 1.0;
     std::vector<uint32_t> shape = {m_observationSize};
     std::string dtype = TypeNameGet<float>();
     Ptr<OpenGymBoxSpace> space = CreateObject<OpenGymBoxSpace>(low, high, shape, dtype);
-    NS_LOG_INFO("GetObservationSpace: Box(" << m_observationSize << ")");
+    NS_LOG_INFO("GetObservationSpace: Box(" << m_observationSize << ") - 7 metrics per link");
     return space;
 }
 
@@ -273,13 +275,19 @@ VanetLinkEnv::CollectLinkMetrics()
             double speedNorm = relSpeed / 50.0;
             speedNorm = std::max(0.0, std::min(1.0, speedNorm));
 
+            // OFDM Error normalization: [0, 1] (already in correct range)
+            double preambleNorm = std::max(0.0, std::min(1.0, metrics.preambleError));
+            double payloadNorm = std::max(0.0, std::min(1.0, metrics.payloadError));
+
             // Add normalized metrics to observation vector in fixed order:
-            // [RSSI, SNR, PacketLoss, Distance, RelativeSpeed]
+            // [RSSI, SNR, PacketLoss, Distance, RelativeSpeed, PreambleError, PayloadError]
             m_currentObservation.push_back(rssiNorm);
             m_currentObservation.push_back(snrNorm);
             m_currentObservation.push_back(plNorm);
             m_currentObservation.push_back(distNorm);
             m_currentObservation.push_back(speedNorm);
+            m_currentObservation.push_back(preambleNorm);
+            m_currentObservation.push_back(payloadNorm);
         }
     }
 
@@ -391,9 +399,9 @@ void
 VanetLinkEnv::NotifyPacketLost(uint32_t nodeId)
 {
     NS_LOG_FUNCTION(this << nodeId);
-    
+
     uint32_t numNodes = m_nodes.GetN();
-    
+
     // Update packet loss for all potential links from this node
     for (uint32_t i = 0; i < numNodes; ++i)
     {
@@ -401,18 +409,72 @@ VanetLinkEnv::NotifyPacketLost(uint32_t nodeId)
         {
             auto key = std::make_pair(nodeId, i);
             LinkMetrics& metrics = m_linkMetrics[key];
-            
+
             metrics.packetsTx++;
-            
+
             // Update packet loss rate
             if (metrics.packetsTx > 0)
             {
-                metrics.packetLoss = 1.0 - (static_cast<double>(metrics.packetsRx) / 
+                metrics.packetLoss = 1.0 - (static_cast<double>(metrics.packetsRx) /
                                            static_cast<double>(metrics.packetsTx));
             }
 
             // Negative reward for packet loss
             m_reward -= 0.05;
+        }
+    }
+}
+
+void
+VanetLinkEnv::NotifyPreambleError(uint32_t nodeId)
+{
+    NS_LOG_FUNCTION(this << nodeId);
+
+    uint32_t numNodes = m_nodes.GetN();
+
+    for (uint32_t i = 0; i < numNodes; ++i)
+    {
+        if (i != nodeId)
+        {
+            auto key = std::make_pair(nodeId, i);
+            LinkMetrics& metrics = m_linkMetrics[key];
+
+            metrics.preambleErrors++;
+
+            uint32_t totalAttempts = metrics.packetsRx + metrics.preambleErrors + metrics.payloadErrors;
+            if (totalAttempts > 0)
+            {
+                metrics.preambleError = static_cast<double>(metrics.preambleErrors) / totalAttempts;
+            }
+
+            m_reward -= 0.01;
+        }
+    }
+}
+
+void
+VanetLinkEnv::NotifyPayloadError(uint32_t nodeId)
+{
+    NS_LOG_FUNCTION(this << nodeId);
+
+    uint32_t numNodes = m_nodes.GetN();
+
+    for (uint32_t i = 0; i < numNodes; ++i)
+    {
+        if (i != nodeId)
+        {
+            auto key = std::make_pair(nodeId, i);
+            LinkMetrics& metrics = m_linkMetrics[key];
+
+            metrics.payloadErrors++;
+
+            uint32_t totalAttempts = metrics.packetsRx + metrics.preambleErrors + metrics.payloadErrors;
+            if (totalAttempts > 0)
+            {
+                metrics.payloadError = static_cast<double>(metrics.payloadErrors) / totalAttempts;
+            }
+
+            m_reward -= 0.015;
         }
     }
 }

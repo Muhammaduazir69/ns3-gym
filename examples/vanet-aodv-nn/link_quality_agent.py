@@ -31,7 +31,7 @@ except ImportError as e:
 
 # Neural Network for Link Quality Classification
 class LinkQualityNN(nn.Module):
-    def __init__(self, input_size=5, hidden_size=64):
+    def __init__(self, input_size=7, hidden_size=64):
         super(LinkQualityNN, self).__init__()
         self.fc1 = nn.Linear(input_size, hidden_size)
         self.fc2 = nn.Linear(hidden_size, hidden_size)
@@ -78,8 +78,8 @@ class LinkQualityEstimator:
         # Convert to numpy array with explicit dtype
         obs = np.array(obs, dtype=np.float32)
 
-        # Reshape to (num_links, 5) where 5 = [RSSI, SNR, PacketLoss, Distance, RelSpeed]
-        num_metrics = 5
+        # Reshape to (num_links, 7) where 7 = [RSSI, SNR, PacketLoss, Distance, RelSpeed, PreambleError, PayloadError]
+        num_metrics = 7
         
         if len(obs) == 0:
             return np.array([], dtype=np.float32).reshape(0, num_metrics)
@@ -105,13 +105,13 @@ class LinkQualityEstimator:
         Classify link quality using heuristic rules
         3 classes: 0=Disconnected, 1=Transient, 2=Connected
         """
-        rssi, snr, packet_loss, distance, rel_speed = link_metrics
+        rssi, snr, packet_loss, distance, rel_speed, preamble_error, payload_error = link_metrics
 
-        # Rule-based classification for ground truth
-        # (Values are normalized to [0, 1])
-        if distance > 0.6 or rssi < 0.2 or packet_loss > 0.5:
+        # Rule-based classification for ground truth (Values normalized to [0, 1])
+        # Enhanced with OFDM error metrics
+        if distance > 0.6 or rssi < 0.2 or packet_loss > 0.5 or preamble_error > 0.3 or payload_error > 0.4:
             return 0  # Disconnected
-        elif distance > 0.3 or packet_loss > 0.2 or rel_speed > 0.6:
+        elif distance > 0.3 or packet_loss > 0.2 or rel_speed > 0.6 or preamble_error > 0.15 or payload_error > 0.2:
             return 1  # Transient
         else:
             return 2  # Connected
@@ -162,7 +162,7 @@ class LinkQualityEstimator:
 
                 # Write header if file is new
                 if not file_exists:
-                    header = ['RSSI', 'SNR', 'PacketLoss', 'Distance', 'RelSpeed', 'LinkQuality']
+                    header = ['RSSI', 'SNR', 'PacketLoss', 'Distance', 'RelSpeed', 'PreambleError', 'PayloadError', 'LinkQuality']
                     writer.writerow(header)
 
                 # Write data
